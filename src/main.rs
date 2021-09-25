@@ -1,6 +1,6 @@
-use actix_web::{web, App, HttpServer, HttpResponse, Error};
+use actix_web::{web, error, App, HttpServer, HttpResponse, Error};
 use std::clone::Clone;
-use serde::{Serialize};
+use serde::{Deserialize, Serialize};
 
 mod storage {
     use s3::creds::Credentials;
@@ -11,6 +11,7 @@ mod storage {
     use uuid::Uuid;
 
     const IMAGE_FOLDER: &str = "images/";
+    const CACHE_FOLDER: &str = "cache/";
 
     #[derive(Clone)]
     pub struct Storage {
@@ -60,11 +61,18 @@ mod storage {
             image_id.to_string()
         }
 
-        pub async fn get(&self, id: String) -> Vec<u8> {
-            let (data, _code) = self.bucket.get_object(format!("{}{}.jpg", IMAGE_FOLDER, id)).await.unwrap_or_else(|_err| {
-                panic!("failed to retrieve image {}", id)
-            });
-            data
+        pub async fn get(&self, id: String, width: Option<i32>, height: Option<i32>) -> Option<Vec<u8>> {
+            let mut folder = IMAGE_FOLDER;
+            let mut name = id;
+            if width.is_some() || height.is_some() {
+                folder = CACHE_FOLDER;
+                name = format!("{}_{:?}_{:?}", name, width.unwrap_or(0), height.unwrap_or(0));
+            }
+            let (data, code) = self.bucket.get_object(format!("{}{}.jpg", folder, name)).await.unwrap();
+            match code {
+                200 => Some(data),
+                _ => None
+            }
         }
     }
 }
@@ -90,11 +98,20 @@ async fn handle_image_upload(bytes: web::Bytes, context: web::Data<ServerContext
     Ok(HttpResponse::Ok().json(resp))
 }
 
-async fn handle_image_get(image_id: web::Path<String>, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
-    let image = context.storage.get(image_id.to_string()).await;
-    Ok(HttpResponse::Ok()
-        .content_type("image/jpeg")
-        .body(image))
+#[derive(Deserialize)]
+struct GetImageParams {
+    w: Option<i32>,
+    h: Option<i32>,
+}
+
+async fn handle_image_get(image_id: web::Path<String>, params: web::Query<GetImageParams>, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
+    let image = context.storage.get(image_id.to_string(), params.w, params.h).await;
+    match image {
+        Some(data) =>  Ok(HttpResponse::Ok()
+                            .content_type("image/jpeg")
+                            .body(data)),
+        None => Err(error::ErrorNotFound("no image found"))
+    }
 }
 
 use storage::Storage;
