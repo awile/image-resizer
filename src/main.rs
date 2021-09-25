@@ -1,4 +1,4 @@
-use actix_web::{get, web, App, HttpServer, HttpResponse, Error};
+use actix_web::{web, App, HttpServer, HttpResponse, Error};
 use std::clone::Clone;
 use serde::{Serialize};
 
@@ -66,10 +66,9 @@ struct ListResponse {
     files: Vec<String>
 }
 
-#[get("/_list")]
-async fn handle_image_list(context: web::Data<ServerContext>) -> HttpResponse {
+async fn handle_image_list(context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
     let files = context.storage.list().await;
-    HttpResponse::Ok().json(ListResponse { files })
+    Ok(HttpResponse::Ok().json(ListResponse { files }))
 }
 
 #[derive(Serialize)]
@@ -105,7 +104,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .data(context.clone())
-            .service(handle_image_list)
+            .route("/_list", web::get().to(handle_image_list))
             .route("/upload", web::post().to(handle_image_upload))
     })
     .bind("127.0.0.1:8080")?
