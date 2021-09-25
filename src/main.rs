@@ -1,6 +1,7 @@
-use actix_web::{web, error, App, HttpServer, HttpResponse, Error};
+use actix_web::{web, error, App, HttpServer, HttpRequest, HttpResponse, Error};
 use std::clone::Clone;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 mod storage {
     use s3::creds::Credentials;
@@ -8,7 +9,6 @@ mod storage {
     use s3::bucket::Bucket;
     use std::env;
     use std::str;
-    use uuid::Uuid;
 
     const IMAGE_FOLDER: &str = "images/";
     const CACHE_FOLDER: &str = "cache/";
@@ -53,22 +53,21 @@ mod storage {
                 .collect()
         }
 
-        pub async fn create(&self, content: &[u8]) -> String {
-            let image_id = Uuid::new_v4();
-            self.bucket.put_object(format!("{}{}.jpg", IMAGE_FOLDER, image_id), &content).await.unwrap_or_else(|err| {
+        pub async fn create(&self, content: &[u8], image_name: &str, _width: Option<i32>, _height: Option<i32>) -> u16 {
+            let (_, code) = self.bucket.put_object(format!("{}{}", IMAGE_FOLDER, image_name), &content).await.unwrap_or_else(|err| {
                 panic!("failed to upload image to bucket: {:?}", err)
             });
-            image_id.to_string()
+            code
         }
 
-        pub async fn get(&self, id: String, width: Option<i32>, height: Option<i32>) -> Option<Vec<u8>> {
+        pub async fn get(&self, image_name: String, width: Option<i32>, height: Option<i32>) -> Option<Vec<u8>> {
             let mut folder = IMAGE_FOLDER;
-            let mut name = id;
+            let mut name = image_name;
             if width.is_some() || height.is_some() {
                 folder = CACHE_FOLDER;
                 name = format!("{}_{:?}_{:?}", name, width.unwrap_or(0), height.unwrap_or(0));
             }
-            let (data, code) = self.bucket.get_object(format!("{}{}.jpg", folder, name)).await.unwrap();
+            let (data, code) = self.bucket.get_object(format!("{}{}", folder, name)).await.unwrap();
             match code {
                 200 => Some(data),
                 _ => None
@@ -92,10 +91,19 @@ struct UploadResponse {
     id: String
 }
 
-async fn handle_image_upload(bytes: web::Bytes, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
-    let id = context.storage.create(&bytes).await;
-    let resp = UploadResponse { id };
-    Ok(HttpResponse::Ok().json(resp))
+async fn handle_image_upload(req: HttpRequest, body: web::Bytes, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
+    let content_type_header = req.headers().get("Content-Type").unwrap_or_else(|| {
+        panic!("No Content Type")
+    });
+    let mime_type: Vec<&str> = content_type_header.to_str().unwrap().split("/").collect();
+    let filename = format!("{}.{}", Uuid::new_v4(), mime_type.last().unwrap());
+    let code = context.storage.create(&body, &filename, None, None).await;
+    let resp = UploadResponse { id: filename };
+    match code {
+        200 => Ok(HttpResponse::Ok().json(resp)),
+        _ => Err(error::ErrorBadRequest("failed to upload image")),
+    }
+
 }
 
 #[derive(Deserialize)]
@@ -106,11 +114,19 @@ struct GetImageParams {
 
 async fn handle_image_get(image_id: web::Path<String>, params: web::Query<GetImageParams>, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
     let image = context.storage.get(image_id.to_string(), params.w, params.h).await;
-    match image {
-        Some(data) =>  Ok(HttpResponse::Ok()
-                            .content_type("image/jpeg")
-                            .body(data)),
-        None => Err(error::ErrorNotFound("no image found"))
+    if image.is_some() {
+        Ok(HttpResponse::Ok()
+                .content_type("image/jpeg")
+                .body(image.unwrap()))
+    } else if params.w.is_none() && params.h.is_none() {
+        Err(error::ErrorNotFound("no image found"))
+    } else {
+        let original_image = context.storage.get(image_id.to_string(), None, None).await;
+        if original_image.is_none() {
+            Err(error::ErrorNotFound("no image found"))
+        } else {
+            Ok(HttpResponse::Ok().body("will resize"))
+        }
     }
 }
 
