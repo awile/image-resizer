@@ -2,6 +2,9 @@ use actix_web::{web, error, App, HttpServer, HttpRequest, HttpResponse, Error};
 use std::clone::Clone;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use image::{ ImageFormat, ImageOutputFormat };
+use image::imageops::FilterType;
+use std::io::Cursor;
 
 mod storage {
     use s3::creds::Credentials;
@@ -53,14 +56,20 @@ mod storage {
                 .collect()
         }
 
-        pub async fn create(&self, content: &[u8], image_name: &str, _width: Option<i32>, _height: Option<i32>) -> u16 {
-            let (_, code) = self.bucket.put_object(format!("{}{}", IMAGE_FOLDER, image_name), &content).await.unwrap_or_else(|err| {
+        pub async fn create(&self, content: &[u8], image_name: String, width: Option<u32>, height: Option<u32>) -> u16 {
+            let mut folder = IMAGE_FOLDER;
+            let mut name = image_name;
+            if width.is_some() || height.is_some() {
+                folder = CACHE_FOLDER;
+                name = format!("{}_{}_{}", name, width.unwrap_or(0), height.unwrap_or(0));
+            }
+            let (_, code) = self.bucket.put_object(format!("{}{}", folder, name), &content).await.unwrap_or_else(|err| {
                 panic!("failed to upload image to bucket: {:?}", err)
             });
             code
         }
 
-        pub async fn get(&self, image_name: String, width: Option<i32>, height: Option<i32>) -> Option<Vec<u8>> {
+        pub async fn get(&self, image_name: String, width: Option<u32>, height: Option<u32>) -> Option<Vec<u8>> {
             let mut folder = IMAGE_FOLDER;
             let mut name = image_name;
             if width.is_some() || height.is_some() {
@@ -97,7 +106,7 @@ async fn handle_image_upload(req: HttpRequest, body: web::Bytes, context: web::D
     });
     let mime_type: Vec<&str> = content_type_header.to_str().unwrap().split("/").collect();
     let filename = format!("{}.{}", Uuid::new_v4(), mime_type.last().unwrap());
-    let code = context.storage.create(&body, &filename, None, None).await;
+    let code = context.storage.create(&body, filename.to_string(), None, None).await;
     let resp = UploadResponse { id: filename };
     match code {
         200 => Ok(HttpResponse::Ok().json(resp)),
@@ -108,8 +117,8 @@ async fn handle_image_upload(req: HttpRequest, body: web::Bytes, context: web::D
 
 #[derive(Deserialize)]
 struct GetImageParams {
-    w: Option<i32>,
-    h: Option<i32>,
+    w: Option<u32>,
+    h: Option<u32>,
 }
 
 async fn handle_image_get(image_id: web::Path<String>, params: web::Query<GetImageParams>, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
@@ -125,7 +134,17 @@ async fn handle_image_get(image_id: web::Path<String>, params: web::Query<GetIma
         if original_image.is_none() {
             Err(error::ErrorNotFound("no image found"))
         } else {
-            Ok(HttpResponse::Ok().body("will resize"))
+            let img = image::load_from_memory_with_format(&original_image.unwrap(), ImageFormat::Jpeg).unwrap_or_else(|err| {
+                panic!("failed to load image {}", err)
+            });
+            let mut w: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+            let resized_image = img.resize_exact(params.w.unwrap(), params.h.unwrap(), FilterType::Nearest);
+            resized_image.write_to(&mut w, ImageOutputFormat::Jpeg(75)).unwrap();
+            let image_bytes = w.into_inner();
+            context.storage.create(&image_bytes, image_id.to_string(), params.w, params.h).await;
+            Ok(HttpResponse::Ok()
+                .content_type("image/jpeg")
+                .body(image_bytes))
         }
     }
 }
