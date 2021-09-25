@@ -1,4 +1,4 @@
-use actix_web::{web, get, App, HttpServer, HttpResponse};
+use actix_web::{get, web, App, HttpServer, HttpResponse, Error};
 use std::clone::Clone;
 use serde::{Serialize};
 
@@ -7,6 +7,9 @@ mod storage {
     use s3::region::Region;
     use s3::bucket::Bucket;
     use std::env;
+    use uuid::Uuid;
+
+    const IMAGE_FOLDER: &str = "images/";
 
     #[derive(Clone)]
     pub struct Storage {
@@ -35,8 +38,7 @@ mod storage {
         }
 
         pub async fn list(&self) -> Vec<String> {
-            let image_prefix = "images/";
-            let results = self.bucket.list(image_prefix.to_string(), Some("/".to_string())).await
+            let results = self.bucket.list(IMAGE_FOLDER.to_string(), Some("/".to_string())).await
                 .unwrap_or_else(|error| {
                     panic!("failed to list bucket {:?}", error)
                 });
@@ -44,9 +46,17 @@ mod storage {
             results
                 .into_iter()
                 .flat_map(|result| result.contents)
-                .map(|file| file.key.strip_prefix(image_prefix).unwrap().to_string())
+                .map(|file| file.key.strip_prefix(IMAGE_FOLDER).unwrap().to_string())
                 .filter(|file| file != "")
                 .collect()
+        }
+
+        pub async fn create(&self, content: &[u8]) -> String {
+            let image_id = Uuid::new_v4();
+            self.bucket.put_object(format!("{}/{}.jpg", IMAGE_FOLDER, image_id), &content).await.unwrap_or_else(|err| {
+                panic!("failed to upload image to bucket: {:?}", err)
+            });
+            image_id.to_string()
         }
     }
 }
@@ -57,9 +67,20 @@ struct ListResponse {
 }
 
 #[get("/_list")]
-async fn handle_image_upload(context: web::Data<ServerContext>) -> HttpResponse {
+async fn handle_image_list(context: web::Data<ServerContext>) -> HttpResponse {
     let files = context.storage.list().await;
     HttpResponse::Ok().json(ListResponse { files })
+}
+
+#[derive(Serialize)]
+struct UploadResponse {
+    id: String
+}
+
+async fn handle_image_upload(bytes: web::Bytes, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
+    let id = context.storage.create(&bytes).await;
+    let resp = UploadResponse { id };
+    Ok(HttpResponse::Ok().json(resp))
 }
 
 use storage::Storage;
@@ -84,7 +105,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .data(context.clone())
-            .service(handle_image_upload)
+            .service(handle_image_list)
+            .route("/upload", web::post().to(handle_image_upload))
     })
     .bind("127.0.0.1:8080")?
     .run()
