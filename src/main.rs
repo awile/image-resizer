@@ -7,6 +7,7 @@ mod storage {
     use s3::region::Region;
     use s3::bucket::Bucket;
     use std::env;
+    use std::str;
     use uuid::Uuid;
 
     const IMAGE_FOLDER: &str = "images/";
@@ -53,10 +54,17 @@ mod storage {
 
         pub async fn create(&self, content: &[u8]) -> String {
             let image_id = Uuid::new_v4();
-            self.bucket.put_object(format!("{}/{}.jpg", IMAGE_FOLDER, image_id), &content).await.unwrap_or_else(|err| {
+            self.bucket.put_object(format!("{}{}.jpg", IMAGE_FOLDER, image_id), &content).await.unwrap_or_else(|err| {
                 panic!("failed to upload image to bucket: {:?}", err)
             });
             image_id.to_string()
+        }
+
+        pub async fn get(&self, id: String) -> Vec<u8> {
+            let (data, _code) = self.bucket.get_object(format!("{}{}.jpg", IMAGE_FOLDER, id)).await.unwrap_or_else(|_err| {
+                panic!("failed to retrieve image {}", id)
+            });
+            data
         }
     }
 }
@@ -80,6 +88,13 @@ async fn handle_image_upload(bytes: web::Bytes, context: web::Data<ServerContext
     let id = context.storage.create(&bytes).await;
     let resp = UploadResponse { id };
     Ok(HttpResponse::Ok().json(resp))
+}
+
+async fn handle_image_get(image_id: web::Path<String>, context: web::Data<ServerContext>) -> Result<HttpResponse, Error> {
+    let image = context.storage.get(image_id.to_string()).await;
+    Ok(HttpResponse::Ok()
+        .content_type("image/jpeg")
+        .body(image))
 }
 
 use storage::Storage;
@@ -106,6 +121,7 @@ async fn main() -> std::io::Result<()> {
             .data(context.clone())
             .route("/_list", web::get().to(handle_image_list))
             .route("/upload", web::post().to(handle_image_upload))
+            .route("/{id}", web::get().to(handle_image_get))
     })
     .bind("127.0.0.1:8080")?
     .run()
