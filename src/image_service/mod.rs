@@ -7,6 +7,7 @@ use image::imageops::FilterType;
 use std::io::Cursor;
 use storage::Storage;
 use std::clone::Clone;
+use image::GenericImageView;
 
 #[derive(Clone)]
 pub struct ImageService {
@@ -86,19 +87,35 @@ impl ImageService {
         } else {
             let original_image = self.storage.get(image_name.to_string(), None, None).await?;
             let image_write_format = ImageService::get_image_output_format(&image_name)?;
-            let resized_image = self.resize_image(&original_image, width?, height?, &image_format, image_write_format)?;
+            let resized_image = self.resize_image(&original_image, width, height, &image_format, image_write_format)?;
             self.storage.create(&resized_image, &image_name, width, height).await;
             Some((resized_image, image_format_header))
         }
     }
 
-    fn resize_image(&self, image_data: &Vec<u8>, width: u32, height: u32, image_read_format: &ImageFormat, image_write_format: ImageOutputFormat) -> Option<Vec<u8>> {
+    fn resize_image(&self, image_data: &Vec<u8>, width: Option<u32>, height: Option<u32>, image_read_format: &ImageFormat, image_write_format: ImageOutputFormat) -> Option<Vec<u8>> {
         let img = image::load_from_memory_with_format(image_data, *image_read_format).unwrap_or_else(|err| {
             panic!("failed to load image {}", err)
         });
         let mut w: Cursor<Vec<u8>> = Cursor::new(Vec::new());
-        let resized_image = img.resize_exact(width, height, FilterType::Nearest);
+        let (new_width, new_height) = self.get_resize_dimensions(width, height, img.dimensions());
+        let resized_image = img.resize_exact(new_width, new_height, FilterType::Nearest);
         resized_image.write_to(&mut w, image_write_format).unwrap();
         Some(w.into_inner())
+    }
+
+    fn get_resize_dimensions(&self, width: Option<u32>, height: Option<u32>, dimensions: (u32, u32)) -> (u32, u32) {
+        match (width, height) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => {
+                let new_height = (dimensions.1 as f64 / dimensions.0 as f64) * w as f64;
+                (w, new_height as u32)
+            },
+            (None, Some(h)) => {
+                let new_width = (dimensions.0 as f64 / dimensions.1 as f64) * h as f64;
+                (new_width as u32, h)
+            },
+            _ => dimensions,
+        }
     }
 }
