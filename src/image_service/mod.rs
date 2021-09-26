@@ -63,6 +63,17 @@ impl ImageService {
         }
     }
 
+    pub async fn list(&self) -> Vec<String> {
+        self.storage.list().await
+    }
+
+    pub async fn create(&self, content: &[u8], content_type: &str) -> (String, u16) {
+        let mime_type: Vec<&str> = content_type.split("/").collect();
+        let image_name = format!("{}.{}", Uuid::new_v4(), mime_type.last().unwrap());
+        let code = self.storage.create(content, &image_name, None, None).await;
+        (image_name, code)
+    }
+
     pub async fn get_image(&self, image_name: &str, width: Option<u32>, height: Option<u32>) -> Option<(Vec<u8>, &'static str)> {
         let image_format = ImageService::get_image_format(&image_name).unwrap();
         let image_format_header = ImageService::get_content_header(&image_format);
@@ -73,36 +84,21 @@ impl ImageService {
         } else if width.is_none() && height.is_none() {
             None
         } else {
-            let original_image = self.storage.get(image_name.to_string(), None, None).await;
-            if original_image.is_none() {
-                None
-            } else {
-                let img = image::load_from_memory_with_format(&original_image.unwrap(), image_format).unwrap_or_else(|err| {
-                    panic!("failed to load image {}", err)
-                });
-
-                let image_output_format = ImageService::get_image_output_format(&image_name);
-                if image_output_format.is_none() {
-                    return None
-                }
-                let mut w: Cursor<Vec<u8>> = Cursor::new(Vec::new());
-                let resized_image = img.resize_exact(width.unwrap(), height.unwrap(), FilterType::Nearest);
-                resized_image.write_to(&mut w, image_output_format.unwrap()).unwrap();
-                let image_bytes = w.into_inner();
-                self.storage.create(&image_bytes, &image_name, width, height).await;
-                Some((image_bytes, image_format_header))
-            }
+            let original_image = self.storage.get(image_name.to_string(), None, None).await?;
+            let image_write_format = ImageService::get_image_output_format(&image_name)?;
+            let resized_image = self.resize_image(&original_image, width?, height?, &image_format, image_write_format)?;
+            self.storage.create(&resized_image, &image_name, width, height).await;
+            Some((resized_image, image_format_header))
         }
     }
 
-    pub async fn list(&self) -> Vec<String> {
-        self.storage.list().await
-    }
-
-    pub async fn create(&self, content: &[u8], content_type: &str) -> (String, u16) {
-        let mime_type: Vec<&str> = content_type.split("/").collect();
-        let image_name = format!("{}.{}", Uuid::new_v4(), mime_type.last().unwrap());
-        let code = self.storage.create(content, &image_name, None, None).await;
-        (image_name, code)
+    fn resize_image(&self, image_data: &Vec<u8>, width: u32, height: u32, image_read_format: &ImageFormat, image_write_format: ImageOutputFormat) -> Option<Vec<u8>> {
+        let img = image::load_from_memory_with_format(image_data, *image_read_format).unwrap_or_else(|err| {
+            panic!("failed to load image {}", err)
+        });
+        let mut w: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+        let resized_image = img.resize_exact(width, height, FilterType::Nearest);
+        resized_image.write_to(&mut w, image_write_format).unwrap();
+        Some(w.into_inner())
     }
 }
