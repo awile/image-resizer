@@ -68,28 +68,34 @@ impl ImageService {
         self.storage.list().await
     }
 
-    pub async fn create(&self, content: &[u8], content_type: &str) -> (String, u16) {
-        let mime_type: Vec<&str> = content_type.split("/").collect();
-        let image_name = format!("{}.{}", Uuid::new_v4(), mime_type.last().unwrap());
-        let code = self.storage.create(content, &image_name, None, None).await;
-        (image_name, code)
+    pub async fn create(&self, content: &[u8], content_type: &str) -> Result<String, &'static str> {
+        let mime_type: &str = content_type.split("/").last().unwrap_or("");
+        let image_name = format!("{}.{}", Uuid::new_v4(), mime_type);
+        let create_resp = self.storage.create(content, &image_name, None, None).await;
+        match create_resp {
+            Ok(_code) => Ok(image_name),
+            Err(err) => Err(err)
+        }
     }
 
     pub async fn get_image(&self, image_name: &str, width: Option<u32>, height: Option<u32>) -> Option<(Vec<u8>, &'static str)> {
-        let image_format = ImageService::get_image_format(&image_name).unwrap();
+        let image_format = ImageService::get_image_format(&image_name).unwrap_or(ImageFormat::Jpeg);
         let image_format_header = ImageService::get_content_header(&image_format);
 
         let image = self.storage.get(image_name.to_string(), width, height).await;
-        if image.is_some() {
-            Some((image.unwrap(), image_format_header))
-        } else if width.is_none() && height.is_none() {
-            None
-        } else {
-            let original_image = self.storage.get(image_name.to_string(), None, None).await?;
-            let image_write_format = ImageService::get_image_output_format(&image_name)?;
-            let resized_image = self.resize_image(&original_image, width, height, &image_format, image_write_format)?;
-            self.storage.create(&resized_image, &image_name, width, height).await;
-            Some((resized_image, image_format_header))
+        match (image, width, height) {
+            (Some(data), _, _) => Some((data, image_format_header)),
+            (None, None, None) => None,
+            _ => {
+                let original_image = self.storage.get(image_name.to_string(), None, None).await?;
+                let image_write_format = ImageService::get_image_output_format(&image_name)?;
+                let resized_image = self.resize_image(&original_image, width, height, &image_format, image_write_format)?;
+                let create_resp = self.storage.create(&resized_image, &image_name, width, height).await;
+                if create_resp.is_err() {
+                    println!("failed to cache image resize: {:?}", create_resp.err());
+                }
+                Some((resized_image, image_format_header))
+            }
         }
     }
 
@@ -100,8 +106,11 @@ impl ImageService {
         let mut w: Cursor<Vec<u8>> = Cursor::new(Vec::new());
         let (new_width, new_height) = self.get_resize_dimensions(width, height, img.dimensions());
         let resized_image = img.resize_exact(new_width, new_height, FilterType::Nearest);
-        resized_image.write_to(&mut w, image_write_format).unwrap();
-        Some(w.into_inner())
+        let write_resp = resized_image.write_to(&mut w, image_write_format);
+        match write_resp {
+            Ok(_) => Some(w.into_inner()),
+            Err(_) => None
+        }
     }
 
     fn get_resize_dimensions(&self, width: Option<u32>, height: Option<u32>, dimensions: (u32, u32)) -> (u32, u32) {
@@ -116,6 +125,61 @@ impl ImageService {
                 (new_width as u32, h)
             },
             _ => dimensions,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_content_header() {
+        let image_formats: [ImageFormat; 4] = [
+            ImageFormat::Jpeg,
+            ImageFormat::Png,
+            ImageFormat::Ico,
+            ImageFormat::Gif,
+        ];
+        let content_headers: [&'static str; 4] = [
+            "image/jpeg",
+            "image/png",
+            "image/ico",
+            "image/gif",
+        ];
+        for (index, img_format) in image_formats.iter().enumerate() {
+            let expected_content_header = content_headers[index];
+            let actual_content_header = ImageService::get_content_header(img_format);
+            assert_eq!(expected_content_header, actual_content_header);
+        }
+    }
+
+    #[test]
+    fn test_get_image_format() {
+        let files: [&'static str; 8] = [
+            "16029914-329c-404a-afe9-5a5a321f6824.jpeg",
+            "aaa22222-d2a9-4a3e-8a83-6aa7abe1a784.jpg",
+            "cf2a1735-d2a9-4a3e-8a83-6aa7abe1a784.png",
+            "ff44a321-d2a9-4a3e-8a83-6aa7abe1a784.ico",
+            "d880aa7f-d2a9-4a3e-8a83-6aa7abe1a784.gif",
+            "33229914-329c-404a-afe9-5a5a321f6824.mov",
+            "f91dbfb9-59eb-4bd2-8347-6ff372be40e4",
+            "f91dbfb9-59eb-4bd2-8347-6ff372be40e4.name.png",
+        ];
+        let format: [Option<ImageFormat>; 8] = [
+            Some(ImageFormat::Jpeg),
+            Some(ImageFormat::Jpeg),
+            Some(ImageFormat::Png),
+            Some(ImageFormat::Ico),
+            Some(ImageFormat::Gif),
+            None,
+            None,
+            None,
+        ];
+        for (index, file) in files.iter().enumerate() {
+            let expected_format = format[index];
+            let actual_format = ImageService::get_image_format(file);
+            assert_eq!(expected_format, actual_format)
         }
     }
 }

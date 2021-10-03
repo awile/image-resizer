@@ -24,11 +24,10 @@ async fn handle_image_upload(req: HttpRequest, body: web::Bytes, context: web::D
     let content_type_header = req.headers().get("Content-Type").unwrap_or_else(|| {
         panic!("No Content Type")
     });
-    let content_type = content_type_header.to_str().unwrap();
-    let (filename, code) = context.image_service.create(&body, &content_type).await;
-    let resp = UploadResponse { id: filename };
-    match code {
-        200 => Ok(HttpResponse::Ok().json(resp)),
+    let content_type = content_type_header.to_str().unwrap_or("");
+    let create_resp = context.image_service.create(&body, &content_type).await;
+    match create_resp {
+        Ok(image_name) => Ok(HttpResponse::Ok().json(UploadResponse{ id: image_name})),
         _ => Err(error::ErrorBadRequest("failed to upload image")),
     }
 }
